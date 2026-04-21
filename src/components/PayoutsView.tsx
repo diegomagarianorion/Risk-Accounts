@@ -8,6 +8,7 @@ interface PayoutRow {
   approvalTimeSecs: number
   amount: number
   share: number
+  dateOfRequest: Date | null
 }
 
 interface ProgramStats {
@@ -20,6 +21,7 @@ interface ProgramStats {
 
 type SortKey = keyof ProgramStats
 type SortDir = 'asc' | 'desc'
+type DateMode = 'range' | 'month'
 
 function parseApprovalTime(raw: string): number {
   if (!raw || raw.trim() === '') return 0
@@ -50,15 +52,84 @@ function fmtCurrency(v: number) {
   return '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
+function parseDateFlexible(raw: string): Date | null {
+  if (!raw || raw.trim() === '') return null
+  const s = raw.trim()
+
+  let candidate: Date | null = null
+
+  // YYYY-MM-DD (ISO, optional time suffix)
+  const isoMatch = s.match(/^(\d{4})-(\d{2})-(\d{2})/)
+  if (isoMatch) {
+    const [, y, m, d] = isoMatch
+    candidate = new Date(Number(y), Number(m) - 1, Number(d))
+  }
+
+  // DD/MM/YYYY or MM/DD/YYYY (with optional " UTC ..." suffix)
+  // Detect format: if first number > 12 it must be DD; if second > 12 it must be DD
+  // Default to DD/MM/YYYY (the format used in this CSV: "20/04/2026 UTC 18:20:19")
+  if (!candidate) {
+    const slashMatch = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/)
+    if (slashMatch) {
+      const [, a, b, y] = slashMatch
+      const n1 = Number(a), n2 = Number(b), yr = Number(y)
+      let dd: number, mm: number
+      if (n1 > 12) {
+        // a is definitely day → DD/MM/YYYY
+        dd = n1; mm = n2
+      } else if (n2 > 12) {
+        // b is definitely day → MM/DD/YYYY
+        mm = n1; dd = n2
+      } else {
+        // Ambiguous — default to DD/MM/YYYY (matches this CSV's format)
+        dd = n1; mm = n2
+      }
+      candidate = new Date(yr, mm - 1, dd)
+    }
+  }
+
+  // DD-MM-YYYY (dash separator)
+  if (!candidate) {
+    const dashMatch = s.match(/^(\d{1,2})-(\d{1,2})-(\d{4})/)
+    if (dashMatch) {
+      const [, dd, mm, y] = dashMatch
+      candidate = new Date(Number(y), Number(mm) - 1, Number(dd))
+    }
+  }
+
+  if (!candidate || isNaN(candidate.getTime())) return null
+
+  // Sanity check: reject implausible years (future or too old)
+  const year = candidate.getFullYear()
+  if (year < 2010 || year > new Date().getFullYear()) return null
+
+  return candidate
+}
+
+function findColIndex(headers: string[], ...candidates: string[]): number {
+  const lower = headers.map(h => h.toLowerCase().trim())
+  for (const c of candidates) {
+    const idx = lower.findIndex(h => h.includes(c.toLowerCase()))
+    if (idx !== -1) return idx
+  }
+  return -1
+}
+
 function parsePayoutsCSV(text: string): PayoutRow[] {
   const result = Papa.parse<string[]>(text, { skipEmptyLines: true })
   const rows = result.data
   if (rows.length < 2) return []
+
+  const headers = rows[0]
+  const dateColIdx = findColIndex(headers, 'date of request', 'request date', 'fecha solicitud', 'fecha de solicitud', 'request')
+  const effectiveDateIdx = dateColIdx !== -1 ? dateColIdx : 17  // fallback to column R
+
   return rows.slice(1).map(row => ({
     program: (row[2] ?? '').trim(),
     approvalTimeSecs: parseApprovalTime(row[13] ?? ''),
     amount: parseFloat((row[14] ?? '0').replace(/[^0-9.-]/g, '')) || 0,
     share: parseFloat((row[15] ?? '0').replace(/[^0-9.-]/g, '')) || 0,
+    dateOfRequest: parseDateFlexible(row[effectiveDateIdx] ?? ''),
   })).filter(r => r.program !== '')
 }
 
@@ -81,6 +152,15 @@ function buildProgramStats(rows: PayoutRow[]): ProgramStats[] {
   }))
 }
 
+function buildProgramStatsFromRows(rows: PayoutRow[]): ProgramStats[] {
+  return buildProgramStats(rows)
+}
+
+const MONTHS = [
+  'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+  'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre',
+]
+
 const COL_LABELS: { key: SortKey; label: string }[] = [
   { key: 'program',         label: 'Programa' },
   { key: 'count',           label: 'Payouts' },
@@ -91,8 +171,7 @@ const COL_LABELS: { key: SortKey; label: string }[] = [
 
 export default function PayoutsView() {
   const [file, setFile] = useState<File | null>(null)
-  const [data, setData] = useState<ProgramStats[] | null>(null)
-  const [totalRows, setTotalRows] = useState(0)
+  const [rawRows, setRawRows] = useState<PayoutRow[] | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -101,9 +180,16 @@ export default function PayoutsView() {
   const [sortDir, setSortDir] = useState<SortDir>('desc')
   const [programSearch, setProgramSearch] = useState('')
 
+  // Date filter state
+  const [dateMode, setDateMode] = useState<DateMode>('month')
+  const [dateFrom, setDateFrom] = useState('')
+  const [dateTo, setDateTo] = useState('')
+  const [filterMonth, setFilterMonth] = useState<number>(-1)   // 0-indexed, -1 = all
+  const [filterYear, setFilterYear] = useState<number>(-1)     // -1 = all
+
   const handleFile = useCallback((f: File) => {
     setFile(f)
-    setData(null)
+    setRawRows(null)
     setError(null)
   }, [])
 
@@ -119,8 +205,7 @@ export default function PayoutsView() {
         setLoading(false)
         return
       }
-      setTotalRows(rows.length)
-      setData(buildProgramStats(rows))
+      setRawRows(rows)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Error al procesar el archivo')
     } finally {
@@ -128,15 +213,65 @@ export default function PayoutsView() {
     }
   }, [file])
 
-  const allPrograms = useMemo(() => data?.map(d => d.program).sort() ?? [], [data])
+  // Available years extracted from the data
+  const availableYears = useMemo(() => {
+    if (!rawRows) return []
+    const years = new Set<number>()
+    for (const r of rawRows) {
+      if (r.dateOfRequest) years.add(r.dateOfRequest.getFullYear())
+    }
+    return Array.from(years).sort((a, b) => b - a)
+  }, [rawRows])
+
+  const allPrograms = useMemo(() => {
+    if (!rawRows) return []
+    return Array.from(new Set(rawRows.map(r => r.program))).sort()
+  }, [rawRows])
+
+  const totalRows = rawRows?.length ?? 0
+
+  const hasDateFilter = useMemo(() => {
+    if (dateMode === 'range') return !!(dateFrom || dateTo)
+    return filterMonth !== -1 || filterYear !== -1
+  }, [dateMode, dateFrom, dateTo, filterMonth, filterYear])
 
   const filtered = useMemo(() => {
-    if (!data) return []
-    let rows = data
-    if (selectedPrograms.size > 0) {
-      rows = rows.filter(r => selectedPrograms.has(r.program))
+    if (!rawRows) return []
+
+    let rows = rawRows
+
+    // Date filter
+    if (dateMode === 'range') {
+      const from = dateFrom ? new Date(dateFrom + 'T00:00:00') : null
+      const to = dateTo ? new Date(dateTo + 'T23:59:59') : null
+      if (from || to) {
+        rows = rows.filter(r => {
+          if (!r.dateOfRequest) return false
+          if (from && r.dateOfRequest < from) return false
+          if (to && r.dateOfRequest > to) return false
+          return true
+        })
+      }
+    } else {
+      if (filterYear !== -1 || filterMonth !== -1) {
+        rows = rows.filter(r => {
+          if (!r.dateOfRequest) return false
+          if (filterYear !== -1 && r.dateOfRequest.getFullYear() !== filterYear) return false
+          if (filterMonth !== -1 && r.dateOfRequest.getMonth() !== filterMonth) return false
+          return true
+        })
+      }
     }
-    return [...rows].sort((a, b) => {
+
+    // Build stats from filtered rows (so counts/amounts are date-aware)
+    let stats = buildProgramStatsFromRows(rows)
+
+    // Program filter
+    if (selectedPrograms.size > 0) {
+      stats = stats.filter(r => selectedPrograms.has(r.program))
+    }
+
+    return [...stats].sort((a, b) => {
       const va = a[sortKey]
       const vb = b[sortKey]
       if (typeof va === 'string' && typeof vb === 'string') {
@@ -144,7 +279,7 @@ export default function PayoutsView() {
       }
       return sortDir === 'asc' ? (va as number) - (vb as number) : (vb as number) - (va as number)
     })
-  }, [data, selectedPrograms, sortKey, sortDir])
+  }, [rawRows, dateMode, dateFrom, dateTo, filterMonth, filterYear, selectedPrograms, sortKey, sortDir])
 
   const totals = useMemo(() => ({
     count: filtered.reduce((s, r) => s + r.count, 0),
@@ -179,11 +314,20 @@ export default function PayoutsView() {
     })
   }
 
+  function clearAllFilters() {
+    setSelectedPrograms(new Set())
+    setDateFrom('')
+    setDateTo('')
+    setFilterMonth(-1)
+    setFilterYear(-1)
+    setProgramSearch('')
+  }
+
   const filteredProgramList = allPrograms.filter(p =>
     p.toLowerCase().includes(programSearch.toLowerCase())
   )
 
-  if (!data) {
+  if (!rawRows) {
     return (
       <div className="max-w-xl mx-auto space-y-4">
         <FileUploader
@@ -216,23 +360,33 @@ export default function PayoutsView() {
     )
   }
 
+  const anyFilter = selectedPrograms.size > 0 || hasDateFilter
+
   return (
     <div className="space-y-6">
       {/* Header row */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-xs text-gray-500">
-          <span className="text-emerald-400 font-semibold">{totalRows.toLocaleString()} payouts</span>
+          <span className="text-emerald-400 font-semibold">{totals.count.toLocaleString()} payouts</span>
+          <span>·</span>
+          <span className="text-gray-500">{totalRows.toLocaleString()} total</span>
           <span>·</span>
           <span>{allPrograms.length} programas</span>
           {selectedPrograms.size > 0 && (
             <>
               <span>·</span>
-              <span className="text-indigo-400">{selectedPrograms.size} filtrados</span>
+              <span className="text-indigo-400">{selectedPrograms.size} prog. filtrados</span>
+            </>
+          )}
+          {hasDateFilter && (
+            <>
+              <span>·</span>
+              <span className="text-violet-400">fecha activa</span>
             </>
           )}
         </div>
         <button
-          onClick={() => { setData(null); setFile(null); setSelectedPrograms(new Set()); setProgramSearch('') }}
+          onClick={() => { setRawRows(null); setFile(null); clearAllFilters() }}
           className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
         >
           Cargar nuevo archivo
@@ -300,39 +454,181 @@ export default function PayoutsView() {
 
       {/* Filters + Table */}
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
-        {/* Program filter panel */}
-        <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3 lg:col-span-1">
-          <div className="flex items-center justify-between">
-            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Filtrar Programas</p>
-            {selectedPrograms.size > 0 && (
+        {/* Filter panel */}
+        <div className="lg:col-span-1 space-y-3">
+
+          {/* Program filter */}
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Programas</p>
+              {selectedPrograms.size > 0 && (
+                <button
+                  onClick={() => setSelectedPrograms(new Set())}
+                  className="text-xs text-indigo-400 hover:text-indigo-300"
+                >
+                  Limpiar
+                </button>
+              )}
+            </div>
+            <input
+              type="text"
+              value={programSearch}
+              onChange={e => setProgramSearch(e.target.value)}
+              placeholder="Buscar..."
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-gray-300 placeholder-gray-600 focus:outline-none focus:border-indigo-500"
+            />
+            <div className="space-y-1 max-h-64 overflow-y-auto scrollbar-thin">
+              {filteredProgramList.map(p => (
+                <label key={p} className="flex items-center gap-2 cursor-pointer group py-0.5">
+                  <input
+                    type="checkbox"
+                    checked={selectedPrograms.has(p)}
+                    onChange={() => toggleProgram(p)}
+                    className="accent-indigo-500 w-3.5 h-3.5"
+                  />
+                  <span className="text-xs text-gray-400 group-hover:text-gray-200 truncate transition-colors">{p}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+
+          {/* Date filter — unified block */}
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <svg className="w-3.5 h-3.5 text-violet-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                </svg>
+                <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Fecha Solicitud</p>
+              </div>
+              {hasDateFilter && (
+                <button
+                  onClick={() => { setDateFrom(''); setDateTo(''); setFilterMonth(-1); setFilterYear(-1) }}
+                  className="text-xs text-violet-400 hover:text-violet-300"
+                >
+                  Limpiar
+                </button>
+              )}
+            </div>
+
+            {/* Mode toggle */}
+            <div className="flex rounded-lg overflow-hidden border border-gray-700 text-xs">
               <button
-                onClick={() => setSelectedPrograms(new Set())}
-                className="text-xs text-indigo-400 hover:text-indigo-300"
+                onClick={() => setDateMode('month')}
+                className={`flex-1 py-1.5 font-medium transition-colors ${
+                  dateMode === 'month'
+                    ? 'bg-violet-600 text-white'
+                    : 'bg-gray-800 text-gray-500 hover:text-gray-300'
+                }`}
               >
-                Limpiar
+                Mes / Año
               </button>
+              <button
+                onClick={() => setDateMode('range')}
+                className={`flex-1 py-1.5 font-medium transition-colors ${
+                  dateMode === 'range'
+                    ? 'bg-violet-600 text-white'
+                    : 'bg-gray-800 text-gray-500 hover:text-gray-300'
+                }`}
+              >
+                Rango exacto
+              </button>
+            </div>
+
+            {dateMode === 'month' ? (
+              <div className="space-y-2">
+                {/* Year selector */}
+                <div>
+                  <label className="text-[10px] text-gray-600 uppercase tracking-wider mb-1 block">Año</label>
+                  <div className="flex flex-wrap gap-1">
+                    <button
+                      onClick={() => setFilterYear(-1)}
+                      className={`px-2 py-1 rounded text-[11px] font-medium transition-colors ${
+                        filterYear === -1
+                          ? 'bg-violet-600 text-white'
+                          : 'bg-gray-800 text-gray-500 hover:text-gray-300 border border-gray-700'
+                      }`}
+                    >
+                      Todo
+                    </button>
+                    {availableYears.map(y => (
+                      <button
+                        key={y}
+                        onClick={() => setFilterYear(filterYear === y ? -1 : y)}
+                        className={`px-2 py-1 rounded text-[11px] font-medium transition-colors ${
+                          filterYear === y
+                            ? 'bg-violet-600 text-white'
+                            : 'bg-gray-800 text-gray-500 hover:text-gray-300 border border-gray-700'
+                        }`}
+                      >
+                        {y}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {/* Month selector */}
+                <div>
+                  <label className="text-[10px] text-gray-600 uppercase tracking-wider mb-1 block">Mes</label>
+                  <div className="grid grid-cols-3 gap-1">
+                    {MONTHS.map((name, idx) => (
+                      <button
+                        key={idx}
+                        onClick={() => setFilterMonth(filterMonth === idx ? -1 : idx)}
+                        className={`py-1 rounded text-[10px] font-medium transition-colors ${
+                          filterMonth === idx
+                            ? 'bg-violet-600 text-white'
+                            : 'bg-gray-800 text-gray-500 hover:text-gray-300 border border-gray-700'
+                        }`}
+                      >
+                        {name.slice(0, 3)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {(filterMonth !== -1 || filterYear !== -1) && (
+                  <p className="text-[10px] text-violet-400 text-center">
+                    {filterMonth !== -1 ? MONTHS[filterMonth] : 'Todo'}{filterYear !== -1 ? ` ${filterYear}` : ''}
+                  </p>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <div>
+                  <label className="text-[10px] text-gray-600 uppercase tracking-wider mb-1 block">Desde</label>
+                  <input
+                    type="date"
+                    value={dateFrom}
+                    onChange={e => setDateFrom(e.target.value)}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-violet-500 [color-scheme:dark]"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-gray-600 uppercase tracking-wider mb-1 block">Hasta</label>
+                  <input
+                    type="date"
+                    value={dateTo}
+                    onChange={e => setDateTo(e.target.value)}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-violet-500 [color-scheme:dark]"
+                  />
+                </div>
+                {(dateFrom || dateTo) && (
+                  <p className="text-[10px] text-violet-400 text-center">
+                    {dateFrom || '…'} → {dateTo || '…'}
+                  </p>
+                )}
+              </div>
             )}
           </div>
-          <input
-            type="text"
-            value={programSearch}
-            onChange={e => setProgramSearch(e.target.value)}
-            placeholder="Buscar..."
-            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-gray-300 placeholder-gray-600 focus:outline-none focus:border-indigo-500"
-          />
-          <div className="space-y-1 max-h-72 overflow-y-auto scrollbar-thin">
-            {filteredProgramList.map(p => (
-              <label key={p} className="flex items-center gap-2 cursor-pointer group py-0.5">
-                <input
-                  type="checkbox"
-                  checked={selectedPrograms.has(p)}
-                  onChange={() => toggleProgram(p)}
-                  className="accent-indigo-500 w-3.5 h-3.5"
-                />
-                <span className="text-xs text-gray-400 group-hover:text-gray-200 truncate transition-colors">{p}</span>
-              </label>
-            ))}
-          </div>
+
+          {/* Clear all */}
+          {anyFilter && (
+            <button
+              onClick={clearAllFilters}
+              className="w-full text-xs text-gray-600 hover:text-gray-400 border border-gray-800 hover:border-gray-700 rounded-xl py-2 transition-colors"
+            >
+              Limpiar todos los filtros
+            </button>
+          )}
         </div>
 
         {/* Table */}
