@@ -8,12 +8,13 @@ import StatsTab from './components/tabs/StatsTab'
 import AllTradesTab from './components/tabs/AllTradesTab'
 import EADetectionTab from './components/tabs/EADetectionTab'
 import AccountComparisonView from './components/AccountComparisonView'
+import PayoutsView from './components/PayoutsView'
 import { parseTradesFile, parseAccountsFile, Trade, Account } from './utils/dataParser'
 import { computeAssetStats, computeSideStats, computeGeneralStats, AssetStats, SideStats, GeneralStats } from './utils/analytics'
 import { detectCopyTrading, SuspiciousGroup } from './utils/copyDetection'
 import { detectEAs, EAGroup } from './utils/eaDetection'
 
-type AppMode = null | 'general' | 'comparison'
+type AppMode = null | 'general' | 'comparison' | 'payouts'
 type TabId = 'stats' | 'assets' | 'sides' | 'extremes' | 'copy' | 'ea' | 'all'
 
 const TABS: { id: TabId; label: string; icon: string }[] = [
@@ -149,7 +150,7 @@ export default function App() {
               <h2 className="text-2xl font-bold text-gray-100">Análisis de Riesgo</h2>
               <p className="text-gray-500 mt-2 text-sm">Seleccioná el tipo de análisis a realizar</p>
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <button
                 onClick={() => setAppMode('general')}
                 className="bg-gray-900 border border-gray-700 hover:border-indigo-600 rounded-2xl p-6 text-left transition-all group"
@@ -174,6 +175,18 @@ export default function App() {
                   Carga dos historiales de operaciones individuales y detectá copy trading o hedging entre ellas.
                 </p>
               </button>
+              <button
+                onClick={() => setAppMode('payouts')}
+                className="bg-gray-900 border border-gray-700 hover:border-emerald-600 rounded-2xl p-6 text-left transition-all group"
+              >
+                <div className="w-10 h-10 rounded-xl bg-emerald-600/20 border border-emerald-600/40 flex items-center justify-center text-emerald-400 text-xl mb-4 group-hover:bg-emerald-600/30 transition-colors">
+                  $
+                </div>
+                <h3 className="font-bold text-gray-100 mb-1">Payouts por Programa</h3>
+                <p className="text-xs text-gray-500 leading-relaxed">
+                  Carga un archivo de payouts. Analizá montos, shares y tiempos de aprobación por tipo de programa.
+                </p>
+              </button>
             </div>
           </div>
         )}
@@ -191,6 +204,22 @@ export default function App() {
               <h2 className="text-sm font-bold text-gray-300">Comparación de Cuentas</h2>
             </div>
             <AccountComparisonView />
+          </div>
+        )}
+
+        {/* Payouts mode */}
+        {appMode === 'payouts' && (
+          <div>
+            <div className="mb-5 flex items-center gap-3">
+              <button
+                onClick={() => setAppMode(null)}
+                className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
+              >
+                ← Volver
+              </button>
+              <h2 className="text-sm font-bold text-gray-300">Payouts por Programa</h2>
+            </div>
+            <PayoutsView />
           </div>
         )}
 
