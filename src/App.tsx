@@ -7,6 +7,7 @@ import CopyDetectionTab from './components/tabs/CopyDetectionTab'
 import StatsTab from './components/tabs/StatsTab'
 import AllTradesTab from './components/tabs/AllTradesTab'
 import EADetectionTab from './components/tabs/EADetectionTab'
+import DailyActivityTab from './components/tabs/DailyActivityTab'
 import AccountComparisonView from './components/AccountComparisonView'
 import PayoutsView from './components/PayoutsView'
 import { parseTradesFile, parseAccountsFile, Trade, Account } from './utils/dataParser'
@@ -15,7 +16,7 @@ import { detectCopyTrading, SuspiciousGroup } from './utils/copyDetection'
 import { detectEAs, EAGroup } from './utils/eaDetection'
 
 type AppMode = null | 'general' | 'comparison' | 'payouts'
-type TabId = 'stats' | 'assets' | 'sides' | 'extremes' | 'copy' | 'ea' | 'all'
+type TabId = 'stats' | 'assets' | 'sides' | 'extremes' | 'copy' | 'ea' | 'all' | 'daily'
 
 const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: 'stats', label: 'General', icon: '◈' },
@@ -23,6 +24,7 @@ const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: 'sides', label: 'BUY vs SELL', icon: '⇅' },
   { id: 'extremes', label: 'Extremos', icon: '⬆⬇' },
   { id: 'all', label: 'Todos los Trades', icon: '≡' },
+  { id: 'daily', label: 'Daily Activity', icon: '⏱' },
   { id: 'copy', label: 'Copy Detection', icon: '⚑' },
   { id: 'ea', label: 'EA Detection', icon: '⚙' },
 ]
@@ -346,6 +348,7 @@ export default function App() {
                   {activeTab === 'sides' && <SidesTab stats={result.sideStats} />}
                   {activeTab === 'extremes' && <ExtremeTradesTab trades={result.trades} />}
                   {activeTab === 'all' && <AllTradesTab trades={result.trades} />}
+                  {activeTab === 'daily' && <DailyActivityTab trades={result.trades} />}
                   {activeTab === 'copy' && <CopyDetectionTab groups={result.suspiciousGroups} />}
                   {activeTab === 'ea' && <EADetectionTab groups={result.eaGroups} />}
                 </div>
